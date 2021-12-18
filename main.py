@@ -6,7 +6,12 @@ from train import *
 import os
 import json
 from datasets import dataset_map
-
+from models.RNN import *
+from models.CNN import *
+from models.LSTM import *
+from models.RCNN import *
+from models.LSTM_Attn import *
+from models.selfAttention import *
 pretrained_GloVe_sizes = [50, 100, 200, 300]
 
 
