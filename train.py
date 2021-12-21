@@ -1,68 +1,36 @@
 import argparse
-import os, sys
 import time
 import numpy as np
-import torch
-import torch.nn as nn
-
-from datasets import dataset_map
-from model import *
-from torchtext.vocab import GloVe
-
-
-def make_parser():
-    parser = argparse.ArgumentParser(description='PyTorch RNN Classifier w/ attention')
-    parser.add_argument('--data', type=str, default='SST',
-                        help='Data corpus: [SST, TREC, IMDB]')
-    parser.add_argument('--model', type=str, default='LSTM',
-                        help='type of recurrent net [LSTM, GRU]')
-    parser.add_argument('--emsize', type=int, default=300,
-                        help='size of word embeddings [Uses pretrained on 50, 100, 200, 300]')
-    parser.add_argument('--hidden', type=int, default=500,
-                        help='number of hidden units for the RNN encoder')
-    parser.add_argument('--nlayers', type=int, default=2,
-                        help='number of layers of the RNN encoder')
-    parser.add_argument('--lr', type=float, default=1e-3,
-                        help='initial learning rate')
-    parser.add_argument('--clip', type=float, default=5,
-                        help='gradient clipping')
-    parser.add_argument('--epochs', type=int, default=10,
-                        help='upper epoch limit')
-    parser.add_argument('--batch_size', type=int, default=32, metavar='N',
-                        help='batch size')
-    parser.add_argument('--drop', type=float, default=0,
-                        help='dropout')
-    parser.add_argument('--bi', action='store_true',
-                        help='[USE] bidirectional encoder')
-    parser.add_argument('--cuda', action='store_false',
-                        help='[DONT] use CUDA')
-    parser.add_argument('--fine', action='store_true',
-                        help='use fine grained labels in SST')
-    return parser
+from simple_chalk import chalk
+from torch.nn import Module
+from torch import max, eq, sum, no_grad
+from torch.nn.utils import clip_grad_norm_
+from torch.nn.modules import loss
+from torch.optim import optimizer
+from torchtext.legacy.data.iterator import Iterator
 
 
-def seed_everything(seed, cuda=False):
-    # Set the random seed manually for reproducibility.
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if cuda:
-        torch.cuda.manual_seed_all(seed)
-
-
-def update_stats(accuracy, confusion_matrix, logits, y):
-    _, max_ind = torch.max(logits, 1)
-    equal = torch.eq(max_ind, y)
-    correct = int(torch.sum(equal))
+def update_stats(correct_predictions, confusion_matrix, logit, y):
+    _, max_ind = max(logit, 1)
+    equal = eq(max_ind, y)
+    correct = int(sum(equal))
 
     for j, i in zip(max_ind, y):
         confusion_matrix[int(i), int(j)] += 1
 
-    return accuracy + correct, confusion_matrix
+    return correct_predictions + correct, confusion_matrix
 
 
-def train(model, data, optimizer, criterion, args):
+def train_an_epoch(
+        model: Module,
+        data: Iterator,
+        opt: optimizer,
+        criterion: loss,
+        args: argparse,
+        epoch_num: int
+):
     model.train()
-    accuracy, confusion_matrix = 0, np.zeros((args.nlabels, args.nlabels), dtype=int)
+    correct_predictions, confusion_matrix = 0, np.zeros((args.nlabels, args.nlabels), dtype=int)
     t = time.time()
     total_loss = 0
     for batch_num, batch in enumerate(data):
@@ -71,116 +39,64 @@ def train(model, data, optimizer, criterion, args):
         y = batch.label
 
         logit, _ = model(x)
-        loss = criterion(logit.view(-1, args.nlabels), y)
-        total_loss += loss
-        accuracy, confusion_matrix = update_stats(accuracy, confusion_matrix, logit, y)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
-        optimizer.step()
+        curr_loss = criterion(logit.view(-1, args.nlabels), y)
+        total_loss += float(curr_loss)
+        correct_predictions, confusion_matrix = update_stats(correct_predictions, confusion_matrix, logit, y)
+        curr_loss.backward()
+        clip_grad_norm_(model.parameters(), args.clip)
+        opt.step()
 
-        print("[Batch]: {}/{} in {:.5f} seconds".format(
-            batch_num, len(data), time.time() - t), end='\r', flush=True)
-        t = time.time()
+    epoch_loss, epoch_acc = total_loss / len(data), correct_predictions / len(data.dataset) * 100
+    time_elapsed = time.time() - t
 
-    print()
-    print("[Loss]: {:.5f}".format(total_loss / len(data)))
-    print("[Accuracy]: {}/{} : {:.3f}%".format(
-        accuracy, len(data.dataset), accuracy / len(data.dataset) * 100))
-    print(confusion_matrix)
-    return total_loss / len(data)
+    print(f'{chalk.bold("TRAINING   --->")} '
+          f'{chalk.bold.greenBright("[EPOCH-{}]".format(epoch_num))} '
+          f'{chalk.bold("TIME ELAPSED:")} {"{:.2f}s".format(time_elapsed)} '
+          f'{chalk.bold.redBright("LOSS:")} {"{:.5f}".format(epoch_loss)} '
+          f'{chalk.bold.yellowBright("ACC:")} {"{:.2f}".format(epoch_acc)}')
+
+    return {
+        "epoch_num": epoch_num,
+        "epoch_loss:": epoch_loss,
+        "epoch_acc": epoch_acc,
+        "time_elapsed": time_elapsed,
+        "confusion_matrix": confusion_matrix.tolist()
+    }
 
 
-def evaluate(model, data, optimizer, criterion, args, type='Valid'):
+def evaluate_an_epoch(
+        model: Module,
+        data: Iterator,
+        criterion: loss,
+        args: argparse,
+        epoch_num: int = 1
+):
     model.eval()
-    accuracy, confusion_matrix = 0, np.zeros((args.nlabels, args.nlabels), dtype=int)
+    correct_predictions, confusion_matrix = 0, np.zeros((args.nlabels, args.nlabels), dtype=int)
     t = time.time()
     total_loss = 0
-    with torch.no_grad():
+    with no_grad():
         for batch_num, batch in enumerate(data):
             x, lens = batch.text
             y = batch.label
 
-            logits, _ = model(x)
-            total_loss += float(criterion(logits.view(-1, args.nlabels), y))
-            accuracy, confusion_matrix = update_stats(accuracy, confusion_matrix, logits, y)
-            print("[Batch]: {}/{} in {:.5f} seconds".format(
-                batch_num, len(data), time.time() - t), end='\r', flush=True)
-            t = time.time()
+            logit, _ = model(x)
+            total_loss += float(criterion(logit.view(-1, args.nlabels), y))
+            correct_predictions, confusion_matrix = update_stats(correct_predictions, confusion_matrix, logit, y)
 
-    print()
-    print("[{} loss]: {:.5f}".format(type, total_loss / len(data)))
-    print("[{} accuracy]: {}/{} : {:.3f}%".format(type,
-                                                  accuracy, len(data.dataset), accuracy / len(data.dataset) * 100))
-    print(confusion_matrix)
-    return total_loss / len(data)
+    epoch_loss, epoch_acc = total_loss / len(data), correct_predictions / len(data.dataset) * 100
+    time_elapsed = time.time() - t
 
+    print(f'{chalk.bold("VALIDATION --->")} '
+          f'{chalk.bold.greenBright("[EPOCH-{}]".format(epoch_num))} '
+          f'{chalk.bold("TIME ELAPSED:")} {"{:.2f}s".format(time_elapsed)} '
+          f'{chalk.bold.redBright("LOSS:")} {"{:.5f}".format(epoch_loss)} '
+          f'{chalk.bold.yellowBright("ACC:")} {"{:.2f}".format(epoch_acc)}')
 
-pretrained_GloVe_sizes = [50, 100, 200, 300]
-
-
-def load_pretrained_vectors(dim):
-    if dim in pretrained_GloVe_sizes:
-        # Check torchtext.datasets.vocab line #383
-        # for other pretrained vectors. 6B used here
-        # for simplicity
-        name = 'glove.{}.{}d'.format('6B', str(dim))
-        return name
-    return None
-
-
-def main():
-    args = make_parser().parse_args()
-    print("[Model hyperparams]: {}".format(str(args)))
-
-    cuda = torch.cuda.is_available() and args.cuda
-    device = torch.device("cpu") if not cuda else torch.device("cuda:0")
-    seed_everything(seed=1337, cuda=cuda)
-    vectors = load_pretrained_vectors(args.emsize)
-
-    # Load dataset iterators
-    iters, TEXT, LABEL = dataset_map[args.data](args.batch_size, device=device, vectors=vectors)
-
-    # Some datasets just have the train & test sets, so we just pretend test is valid
-    if len(iters) == 3:
-        train_iter, val_iter, test_iter = iters
-    else:
-        train_iter, test_iter = iters
-        val_iter = test_iter
-
-    print("[Corpus]: train: {}, test: {}, vocab: {}, labels: {}".format(
-        len(train_iter.dataset), len(test_iter.dataset), len(TEXT.vocab), len(LABEL.vocab)))
-
-    ntokens, nlabels = len(TEXT.vocab), len(LABEL.vocab)
-    args.nlabels = nlabels  # hack to not clutter function arguments
-
-    embedding = nn.Embedding(ntokens, args.emsize, padding_idx=1, max_norm=1)
-    if vectors: embedding.weight.data.copy_(TEXT.vocab.vectors)
-    encoder = Encoder(args.emsize, args.hidden, nlayers=args.nlayers,
-                      dropout=args.drop, bidirectional=args.bi, rnn_type=args.model)
-
-    attention_dim = args.hidden if not args.bi else 2 * args.hidden
-    attention = Attention(attention_dim, attention_dim, attention_dim)
-
-    model = Classifier(embedding, encoder, attention, attention_dim, nlabels)
-    model.to(device)
-
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), args.lr, amsgrad=True)
-
-    try:
-        best_valid_loss = None
-
-        for epoch in range(1, args.epochs + 1):
-            train(model, train_iter, optimizer, criterion, args)
-            loss = evaluate(model, val_iter, optimizer, criterion, args)
-
-            if not best_valid_loss or loss < best_valid_loss:
-                best_valid_loss = loss
-
-    except KeyboardInterrupt:
-        print("[Ctrl+C] Training stopped!")
-    loss = evaluate(model, test_iter, optimizer, criterion, args, type='Test')
-
-
-if __name__ == '__main__':
-    main()
+    return {
+        "epoch_num": epoch_num,
+        "epoch_loss": epoch_loss,
+        "epoch_acc": epoch_acc,
+        "time_elapsed": time_elapsed,
+        "confusion_matrix": confusion_matrix.tolist()
+    }

@@ -3,21 +3,30 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-RNNS = ['LSTM', 'GRU']
-
 
 class Encoder(nn.Module):
-    def __init__(self, embedding_dim, hidden_dim, nlayers=1, dropout=0.,
-                 bidirectional=True, rnn_type='GRU'):
+    def __init__(
+            self,
+            embedding_dim,
+            hidden_dim,
+            num_layers=1,
+            dropout=0.,
+            bidirectional=True,
+            rnn_type='GRU'
+    ):
         super(Encoder, self).__init__()
         self.bidirectional = bidirectional
-        assert rnn_type in RNNS, 'Use one of the following: {}'.format(str(RNNS))
         rnn_cell = getattr(nn, rnn_type)  # fetch constructor from torch.nn, cleaner than if
-        self.rnn = rnn_cell(embedding_dim, hidden_dim, nlayers,
-                            dropout=dropout, bidirectional=bidirectional)
+        self.rnn = rnn_cell(
+            embedding_dim,
+            hidden_dim,
+            num_layers,
+            dropout=dropout,
+            bidirectional=bidirectional
+        )
 
-    def forward(self, input, hidden=None):
-        return self.rnn(input, hidden)
+    def forward(self, inp, hidden=None):
+        return self.rnn(inp, hidden)
 
 
 class Attention(nn.Module):
@@ -44,7 +53,14 @@ class Attention(nn.Module):
 
 
 class Classifier(nn.Module):
-    def __init__(self, embedding, encoder, attention, hidden_dim, num_classes):
+    def __init__(
+            self,
+            embedding,
+            encoder,
+            attention,
+            hidden_dim,
+            num_classes
+    ):
         super(Classifier, self).__init__()
         self.embedding = embedding
         self.encoder = encoder
@@ -70,7 +86,8 @@ class Classifier(nn.Module):
         # Other options (work worse on a few tests):
         # linear_combination, _ = torch.max(outputs, 0)
         # linear_combination = torch.mean(outputs, 0)
-
+        # energy = 0
         energy, linear_combination = self.attention(hidden, outputs, outputs)
-        logits = self.decoder(linear_combination)
-        return logits, energy
+        logit = self.decoder(linear_combination)
+        # logit = self.decoder(hidden)
+        return logit, energy
