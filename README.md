@@ -2,7 +2,7 @@
 @Zeying Tian @Yining Duan @Dailun Li
 
 
-This repository is created based on @Keon's  barebone seq2seq implementation.
+This repository is created based on @Keon's barebone seq2seq implementation.
 ## Recurrent neural network classifier with self-attention
 
 This is a a minimal RNN-based classification model (many-to-one) with self-attention.
